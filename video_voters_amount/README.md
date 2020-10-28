@@ -38,6 +38,7 @@ ffmpeg -i "УИК 577 камера №1 2012-03-04_UTC_15-00.mp4-4tstsZuA0XQ.mkv
 cd ../../src
 python demo.py mot \
     --load_model ../models/fairmot_dla34.pth \
-    --input-video ../data/2012_President_elections/sample.mp4
+    --input-video ../data/2012_President_elections/sample.mp4 \
+    --conf_thres 0.2 --det_thres 0.2
 ```
 result can be found in file data/result.mp4
