@@ -1,0 +1,13 @@
+
+<!doctype html>
+<html>
+  <body class="text-center">
+    <form class="form-upload" method=post enctype=multipart/form-data>
+      <h1 class="h3 mb-3 font-weight-normal">Please upload image</h1>
+      <input type="file" id="image" name="image" class="form-control" required autofocus>
+      <button class="btn btn-lg btn-primary btn-block" type="submit">Predict</button>
+      <br>
+    <h3 class="h3 mb-3 font-weight-normal">Prediction: {{prediction}}</h3>
+    </form>
+  </body>
+</html>
