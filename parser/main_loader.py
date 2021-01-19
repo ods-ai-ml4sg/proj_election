@@ -4,12 +4,14 @@ import logging
 import multiprocessing
 import os
 import pathlib
+import pickle
 from datetime import date
 
 import django
 import pandas as pd
 from django_pandas.io import read_frame
 from selenium import webdriver
+from selenium.common.exceptions import WebDriverException
 from tqdm import tqdm
 from webdriver_manager.chrome import ChromeDriverManager
 
@@ -18,6 +20,9 @@ from selenium.webdriver.chrome.options import Options
 
 from ParsingFunctions import get_links_UIK, get_election_result, load_candidates
 import numpy as np
+
+from enums import CandidateListType
+from ProtocolRowMapping import ProtocolRowValuesVerified
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "elections_db.settings")
 django.setup()
@@ -41,11 +46,14 @@ def init_driver(headless=True):
     '''
     global download_dir, driver
     chrome_options = Options()
-    download_dir = pathlib.Path(os.getcwd(), 'downloads')
+
     if headless:
         chrome_options.add_argument("--headless")
-        current = multiprocessing.current_process()
-        download_dir = pathlib.Path(download_dir, current.name)
+        chrome_options.add_argument("--enable-javascript")
+    current = multiprocessing.current_process()
+    download_dir = pathlib.Path(os.getcwd(), 'downloads', current.name)
+    prefs = {"download.default_directory": str(download_dir)}
+    chrome_options.add_experimental_option("prefs", prefs)
     os.makedirs(download_dir, exist_ok=True)
     driver = webdriver.Chrome(ChromeDriverManager().install(), options=chrome_options)
     return driver
@@ -62,11 +70,13 @@ class ElectionParser:
                                   'избрание': 'elected'
                                   }
 
+    DETACHED = 'открепит'
+
     def __init__(self):
-        self.unmapped_row = set()
+        self.unmapped_rows = set()
 
     def get_protocol_and_candidate_performance_from_url_list(self, election_result_type, url_list):
-        results_data = {i: get_election_result(i, driver, election_result_type=election_result_type) for i in
+        results_data = {i: get_election_result(i, driver, candidate_list_type=election_result_type) for i in
                         url_list}
 
         # WORKAROUND: there is currently a problem, where instead of having both types of election data on uik pages
@@ -84,22 +94,27 @@ class ElectionParser:
 
         return protocols, candidate_performance
 
-    def get_results_from_single_election_series(self, election_series):
+    def get_results_from_single_election(self, election_tuple):
         '''
-        :param election_series: pd.Series that is a row from df returned by get_upper_level_links()
+        :param election_series: tuple(int, pd.Series) that is a row from df returned by get_upper_level_links()
         :return: {'election_package': ElectionDataPackage(...), 'unmapped_rows': {}} if everything is ok
                 or
                 {'election_package': None, 'unmapped_rows': set{...} if at least one stage of parsing / transforming failed
         '''
+        election_series = election_tuple[1]
         logger.info('Loading election {}'.format(election_series['name']))
-        uik_links_data = get_links_UIK(election_series.election_url, driver=driver)
+        try:
+            uik_links_data = get_links_UIK(election_series.election_url, driver=driver)
+        except WebDriverException:
+            return {'election_package': None, 'unmapped_rows': None}
         uik_links_data = pd.DataFrame.from_dict(uik_links_data, orient='columns')
+
         self.check_for_missing_summaries(uik_links_data)
 
         results_data_all = {}
         candidates_performance_all = {}
         candidates_all = {}
-        for election_result_type in ['common', 'specific']:
+        for election_result_type in CandidateListType.names():
             summary_column = 'summary_found_'+ election_result_type
             if summary_column not in uik_links_data.columns:
                 continue
@@ -117,7 +132,7 @@ class ElectionParser:
                     election_result_type, uik_links_data_by_type.protocol_url)
             except ValueError as e:
                 print(e)
-                return {'election_package': None, 'unmapped_rows': self.unmapped_row}
+                return {'election_package': None, 'unmapped_rows': self.unmapped_rows}
 
             if unique_summaries:
                 for summary_link in summary_protocols.columns:
@@ -125,16 +140,23 @@ class ElectionParser:
                     uiks_for_summary = \
                         uik_protocols.columns.intersection(
                             uik_links_data_by_type.loc[uik_links_data_by_type[summary_column] == summary_link, 'protocol_url'].tolist())
-                    self.check_sums_vs_summary_data(uik_protocols[uiks_for_summary],
-                                                    summary_protocols[summary_link])
+                    try:
+                        self.check_sums_vs_summary_data(uik_protocols[uiks_for_summary],
+                                                        summary_protocols[summary_link])
 
-                    self.check_sums_vs_summary_data(uik_candidate_performance[uiks_for_summary],
-                                                    summary_candidate_performance[summary_link])
+                        self.check_sums_vs_summary_data(uik_candidate_performance[uiks_for_summary],
+                                                        summary_candidate_performance[summary_link])
+                    except AssertionError as e:
+                        print(e)
+                        return {'election_package': None, 'unmapped_rows': self.unmapped_rows}
 
-            results_protocols = pd.merge(uik_protocols.T.reset_index().rename(columns={'index': 'protocol_url'}),
-                                    uik_links_data_by_type[['commission', 'protocol_url']], on='protocol_url')
-            results_candidate_performance = pd.merge(uik_candidate_performance.T.reset_index().rename(columns={'index': 'protocol_url'}),
-                                    uik_links_data_by_type[['commission', 'protocol_url']], on='protocol_url')
+
+
+            results_protocols = self.enrich_results_with_commission_info(uik_protocols,
+                                                                         uik_links_data_by_type)
+            results_candidate_performance = self.enrich_results_with_commission_info(uik_candidate_performance,
+                                                                                     uik_links_data_by_type)
+
 
             results_data_all[election_result_type] = results_protocols
             candidates_performance_all[election_result_type] = results_candidate_performance
@@ -145,7 +167,9 @@ class ElectionParser:
                 candidates = self.prettify_candidate_df(candidates)
                 candidates_all[election_result_type] = candidates
             except IndexError: #in referendums and party-only elections
-                return {'election_package': None, 'unmapped_rows': {}}
+                pass
+        if len(results_data_all)==0:
+            return {'election_package': None, 'unmapped_rows': {}}
 
         package = ElectionDataPackage.create_packages(election_data=election_series,
                                                       candidate_performance=candidates_performance_all,
@@ -155,19 +179,24 @@ class ElectionParser:
         return {'election_package': package, 'unmapped_rows': {}}
 
 
+    def enrich_results_with_commission_info(self, results, commission_info):
+        return pd.merge(
+            results.T.reset_index().rename(columns={'index': 'protocol_url'}),
+            commission_info[['commission_name', 'protocol_url', 'path']], on='protocol_url')
+
+
     def check_for_missing_summaries(self, uik_links_data):
         '''
         check if all elections have summary info to check against;
         '''
         summaries = pd.DataFrame(index=uik_links_data.index)
-        for election_result_type in ['common', 'specific']:
+        for election_result_type in CandidateListType.names():
             column = 'summary_found_' + election_result_type
             try:
                 summaries[column] = uik_links_data[column]
             except KeyError:
-                summaries[column] = np.empty(uik_links_data.shape[0])
-        summary_found = (
-                    summaries.summary_found_common.isna() & summaries.summary_found_specific.isna())
+                summaries[column] = np.full(uik_links_data.shape[0], np.nan)
+        summary_found = summaries.isna().all(axis=1)
         uiks_without_summary = uik_links_data.protocol_url[summary_found].tolist()
         if uiks_without_summary:
             logger.warning("{} uiks without summary".format(str(len(uiks_without_summary))))
@@ -179,7 +208,8 @@ class ElectionParser:
         :param summary_data:
         '''
         results_data = results_data.dropna().sum(axis=1)
-        assert (results_data.sort_index()!=summary_data.sort_index().dropna()).sum()==0
+        if (results_data.sort_index()!=summary_data.sort_index().dropna()).sum()!=0:
+            raise AssertionError('Sum of protocol numbers doesnt match summary')
 
     def prettify_election_dfs(self, df, link: str):
         '''
@@ -209,20 +239,23 @@ class ElectionParser:
         # TODO multi question referenda?
         if np.isnan(candidate_rows.iloc[0]['count']):
             candidate_names = candidate_rows.row_name.iloc[1:].tolist()
-            if len(candidate_names)==len([c for c in candidate_names if c.lower() in ElectionDataPackage.candidates_technical_values]):
+            if len(candidate_names)==len([c for c in candidate_names if c.lower() in ProtocolRowValuesVerified.candidates_technical_values]):
                 candidate_rows.loc[1, 'row_name'] = candidate_rows.loc[0, 'row_name']
                 candidate_rows = candidate_rows.iloc[1:]
             else:
                 raise ValueError('possible new wording for techical candidates: {}'.format(", ".join(candidate_names)))
         protocol_rows['row_name'] = protocol_rows['row_name'].str.lower()
-        unmapped_row = set(protocol_rows.row_name.dropna().tolist()).difference(set(ElectionDataPackage.protocol_row_mapping_reversed.keys()))
-        if len(unmapped_row)>0:
-            self.unmapped_row |= unmapped_row
-            raise ValueError('unmapped rows found')
+        protocol_rows = protocol_rows.loc[~protocol_rows['row_name'].str.contains(self.DETACHED)]
         protocol_rows = protocol_rows.set_index('row_name')['count'].rename(link)
         candidate_rows = candidate_rows.set_index('row_name')['count'].rename(link)
-        protocol_rows.index = [ElectionDataPackage.protocol_row_mapping_reversed[col] if col in ElectionDataPackage.protocol_row_mapping_reversed else col for
-                      col in protocol_rows.index]
+
+
+        renamer, unmapped_rows = ProtocolRowValuesVerified.get_rename_dict_and_unmapped_rows(protocol_rows.index)
+        if len(unmapped_rows) > 0:
+            self.unmapped_rows |= unmapped_rows
+            raise ValueError('unmapped rows found')
+
+        protocol_rows.rename(index=renamer, inplace=True)
         ElectionDataPackage.add_protocol_items_if_missing(protocol_rows)
         return {'candidate_data':candidate_rows, 'protocol_data':protocol_rows}
 
@@ -258,20 +291,24 @@ class ElectionParser:
         '''
         unpack output of get_results_from_single_election_series
         '''
-        unmapped_rows_collector.update(single_election_output['unmapped_rows'])
+        if single_election_output['unmapped_rows']:
+            unmapped_rows_collector.update(single_election_output['unmapped_rows'])
         if type(single_election_output['election_package']) == ElectionDataPackage:
-            election_package_collector += single_election_output['election_package']
+            election_package_collector.append(single_election_output['election_package'])
 
     def update_unmapped_rows_file(self, path, new_unmapped_rows):
-        with open(path, 'r') as f:
-            current_unmapped_rows = set(f.read().splitlines())
-        with open(path, 'w+') as f:
-            f.write(list(current_unmapped_rows.update(new_unmapped_rows)))
+        try:
+            with open(path, 'rb') as f:
+                current_unmapped_rows = set(pickle.load(f))
+        except(FileNotFoundError, EOFError):
+            current_unmapped_rows = set()
+        with open(path, 'wb+') as f:
+            current_unmapped_rows.update(new_unmapped_rows)
+            pickle.dump(list(current_unmapped_rows), f)
+
 
     def parse_elections_main(self, start_date:date, end_date:date, debug, overwrite=False, n_processes=4,
                              upload_chunk_size=20):
-        if debug and n_processes>1:
-            print('debug mode, ignoring n_processes')
         driver = init_driver(headless=not debug)
         df_with_links_to_elections = get_upper_level_links(start_date, end_date)
 
@@ -282,46 +319,45 @@ class ElectionParser:
         election_df_split = np.array_split(df_with_links_to_elections, np.ceil(df_with_links_to_elections.shape[0] / upload_chunk_size))
 
 
-        if debug:
+        if n_processes==1:
             for election_chunk in tqdm(election_df_split,
                                        desc="Elections parsed and uploaded to db:",
                                        unit_scale=upload_chunk_size):
                 unmapped_rows_collector = set()
                 election_package_collector = []
-                for _ , j in tqdm(election_chunk.iterrows(),
+                for j in tqdm(election_chunk.iterrows(),
                                   desc="Elections parsed in chunk:",
                                   total=election_chunk.shape[0]):
-                    single_election_output = self.get_results_from_single_election_series(j)
+                    single_election_output = self.get_results_from_single_election(j)
                     self.unpack_single_election_output(election_package_collector,
                                                        unmapped_rows_collector,
                                                        single_election_output)
 
                 self.update_unmapped_rows_file('unmapped_rows.txt', unmapped_rows_collector)
-                if election_package_collector is not None:
+                if election_package_collector:
                     ElectionDataPackage.combine_packages(election_package_collector).upload_to_database()
 
         else:
             driver.close()
             driver = None
-            pool = multiprocessing.Pool(processes=n_processes, initializer=init_driver, initargs=[True])
+            pool = multiprocessing.Pool(processes=n_processes, initializer=init_driver, initargs=[not debug])
 
             for election_chunk in tqdm(election_df_split,
                                        desc="Elections parsed and uploaded to db:",
                                        unit_scale=upload_chunk_size):
                 unmapped_rows_collector = set()
                 election_package_collector = []
-                results = list(tqdm(pool.imap(self.get_results_from_single_election_series, election_chunk.iterrows()),
-                                    total=election_chunk.shape[0],
-                                    unit_scale=upload_chunk_size))
+                results = list(tqdm(pool.imap(self.get_results_from_single_election, election_chunk.iterrows()),
+                                    total=election_chunk.shape[0]))
                 for single_election_output in results:
                     self.unpack_single_election_output(election_package_collector,
-                                                       single_election_output,
-                                                       unmapped_rows_collector)
+                                                       unmapped_rows_collector,
+                                                       single_election_output)
                 self.update_unmapped_rows_file('unmapped_rows.txt', unmapped_rows_collector)
-                if election_package_collector is not None:
+                if len(election_package_collector):
                     ElectionDataPackage.combine_packages(election_package_collector).upload_to_database()
 
             pool.close()
 
 if __name__ == '__main__':
-    ElectionParser().parse_elections_main(date(2020,9,12), date(2020,12,14), debug=True, upload_chunk_size=20)
+    ElectionParser().parse_elections_main(date(2020,9,11), date(2020,12,14), debug=False, n_processes=1, upload_chunk_size=5)

@@ -10,15 +10,18 @@ import time
 import pytesseract
 from typing import BinaryIO, List, Dict
 from io import BytesIO
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import NoSuchElementException, WebDriverException
 from selenium.webdriver.support.ui import Select
 import re
 import numpy as np
 
+from enums import CandidateListType
+
 SLEEP_TIME = 0.1
 
+LOAD_ATTEMPTS = 5
 
-endings = {'results':{'common': ['232',
+endings = {'results':{CandidateListType.COMMON.name: ['232',
                                 '234',
                                 '226',
                                 '228',
@@ -26,14 +29,14 @@ endings = {'results':{'common': ['232',
                                 '425',
                                 '457'
                                 ],
-                      'specific': ['426',
+                      CandidateListType.SPECIFIC.name: ['426',
                                 '423',
                                 '463'
                                    ]},
-           'candidates':{'common': ["221",
+           'candidates':{CandidateListType.COMMON.name: ["221",
                                     "220&report_mode=1"
                                     ],
-                         'specific':["220"
+                         CandidateListType.SPECIFIC.name:["220"
                                     ]} }
 
 
@@ -84,16 +87,12 @@ def get_through_captcha(driver, url: str):
         None
     """
 
-    #driver.get(url)
-    #time.sleep(SLEEP_TIME)
     flag = 1
     while flag:
         try:
-            element_dlya = driver.find_element_by_xpath("//table")
+            driver.find_element_by_xpath("//table")
             flag = 0
         except NoSuchElementException:
-            #empty_space = driver.find_element_by_xpath("//html")
-            #empty_space.click()
             captcha_elements = find_and_recognize_captcha(driver)
             captcha_input_field = captcha_elements["captcha_input_field"]
             captcha_text = captcha_elements["captcha_text"]
@@ -102,7 +101,7 @@ def get_through_captcha(driver, url: str):
             time.sleep(SLEEP_TIME)
 
 
-def get_election_result(url: str, driver, election_result_type, walk_back=False) -> pd.DataFrame:
+def get_election_result(url: str, driver, candidate_list_type, walk_back=False) -> pd.DataFrame:
     """Load election result data
     Args:
         url (str): url link
@@ -114,12 +113,7 @@ def get_election_result(url: str, driver, election_result_type, walk_back=False)
     get_through_captcha(driver, url)
     links = [element.get_attribute("href") for element in driver.find_elements_by_xpath("//a[@href]")]
     try:
-        if election_result_type=='common':
-            url = search_for_endings(links, [TYPE + ending for ending in endings['results']['common']])
-        elif election_result_type=='specific':
-            url = search_for_endings(links, [TYPE + ending for ending in endings['results']['specific']])
-        else:
-            raise ValueError('Wrong election_result_type')
+        url = search_for_endings(links, [TYPE + ending for ending in endings['results'][candidate_list_type]])
     except IndexError:
         return None
 
@@ -131,7 +125,11 @@ def get_election_result(url: str, driver, election_result_type, walk_back=False)
     if table_result=='[]':
         return None
     else:
-        return pd.read_html(table_result)[0]
+        try:
+            return pd.read_html(table_result)[0]
+        except ValueError as e: # edge case: cancelled elections
+            print(e)
+            return None
 
 
 def search_for_endings(list_of_links, endings):
@@ -145,21 +143,10 @@ def test_if_new_layers(driver, propagate = {}, level_name=None, inceptions_level
     propagate_copy = copy.deepcopy(propagate)
 
     # check for summary for common part of elections (e.g. voting for parties)
-    if 'summary_found_common' not in propagate_copy:
-        cur_url = driver.current_url
-        table = get_election_result(driver.current_url, driver, election_result_type='common', walk_back=True)
-        if type(table)==pd.DataFrame:
-            propagate_copy['summary_found_common'] = cur_url
-            propagate_copy['summary_level_name_common'] = level_name
+    try_to_find_summary_if_not_already_present(driver, level_name, propagate_copy, CandidateListType.COMMON.name)
 
-
-    # check for summary for common part of elections (e.g. voting for parties)
-    if 'summary_found_specific' not in propagate_copy:
-        cur_url = driver.current_url
-        table = get_election_result(driver.current_url, driver, election_result_type='specific', walk_back=True)
-        if type(table)==pd.DataFrame:
-            propagate_copy['summary_found_specific'] = cur_url
-            propagate_copy['summary_level_name_specific'] = level_name
+    # check for summary for specific part of elections (e.g. voting for district candidates)
+    try_to_find_summary_if_not_already_present(driver, level_name, propagate_copy, CandidateListType.SPECIFIC.name)
 
     try:
         link_to_real_data = driver.find_element_by_xpath(
@@ -177,7 +164,7 @@ def test_if_new_layers(driver, propagate = {}, level_name=None, inceptions_level
         link_to_real_data.click()
 
         path = 'direct' if inceptions_level==0 else path
-        output += [{'commission':k.next,
+        output += [{'commission_name':str(k.next),
                     'path':path,
                     'protocol_url':k['value'],
                     **propagate_copy} for k in BeautifulSoup(
@@ -214,6 +201,15 @@ def test_if_new_layers(driver, propagate = {}, level_name=None, inceptions_level
         return
 
 
+def try_to_find_summary_if_not_already_present(driver, level_name, propagate_copy, candidate_list_type):
+    if 'summary_found_' + candidate_list_type not in propagate_copy:
+        cur_url = driver.current_url
+        table = get_election_result(driver.current_url, driver, candidate_list_type=candidate_list_type, walk_back=True)
+        if type(table) == pd.DataFrame:
+            propagate_copy['summary_found_' + candidate_list_type] = cur_url
+            propagate_copy['summary_level_name_' + candidate_list_type] = level_name
+
+
 def back_steps(driver) -> int:
     try:
         driver.back()
@@ -238,18 +234,13 @@ def get_links_UIK(link: str, driver) -> list:
     return list_of_links_to_UIK_data
 
 
-def load_candidates(driver, election_url, election_result_type, download_path):
+def load_candidates(driver, election_url, candidate_list_type, download_path):
     driver.get(election_url)
     time.sleep(SLEEP_TIME)
     get_through_captcha(driver, election_url)
     links = [element.get_attribute("href") for element in driver.find_elements_by_xpath("//a[@href]")]
 
-    if election_result_type=='common':
-        url = search_for_endings(links, [TYPE + ending for ending in endings['candidates']['common']])
-    elif election_result_type=='specific':
-        url = search_for_endings(links, [TYPE + ending for ending in endings['candidates']['specific']])
-    else:
-        raise ValueError('Wrong election_result_type')
+    url = search_for_endings(links, [TYPE + ending for ending in endings['candidates'][candidate_list_type]])
 
     link_to_vote_candidate_page = driver.find_element_by_xpath('//a[@href="'+url+'"]')
     link_to_vote_candidate_page.click()

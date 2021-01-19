@@ -1,7 +1,9 @@
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
-from enums import ElectionLevel, ElectionMandateType, NominatorType, DistrictType, CommissionType, CommissionPositionType, CandidateType
+from enums import ElectionLevel, ElectionMandateNumberType, NominatorType, DistrictType, CommissionType, \
+    CommissionPositionType, CandidateType, ElectionsByCandidateListType, CandidateListType
+from django.contrib.postgres.fields import JSONField
 
 
 class Nominator(models.Model):
@@ -34,7 +36,8 @@ class Region(models.Model):
 class Election(models.Model):
     name = models.CharField(max_length=1000)
     election_level = models.CharField(max_length=50, choices=ElectionLevel.choices(), blank=True, null=True)
-    election_mandate_type = models.CharField(max_length=50, choices=ElectionMandateType.choices(), blank=True, null=True)
+    election_mandate_number_type = models.CharField(max_length=50, choices=ElectionMandateNumberType.choices(), blank=True, null=True)
+    election_candidate_list_type = models.CharField(max_length=50, choices=ElectionsByCandidateListType.choices(), blank=True, null=True)
     mandates = models.IntegerField(blank=True, null=True)
     previous_election = models.ForeignKey("self", on_delete=models.DO_NOTHING,
                                           related_name='next_elections',
@@ -116,6 +119,8 @@ class CommissionMember(models.Model):
 
 class CommissionProtocol(models.Model):
     commission = models.ForeignKey(Commission, on_delete=models.CASCADE, blank=True, null=True)
+    commission_name = models.TextField()
+    path = JSONField()
     protocol_url = models.TextField()
     election = models.ForeignKey(Election, on_delete=models.CASCADE)
     amount_of_voters = models.IntegerField()
@@ -135,14 +140,14 @@ class CommissionProtocol(models.Model):
     invalid_ballots = models.IntegerField()
     lost_ballots = models.IntegerField()
     appeared_ballots = models.IntegerField()
-    election_type = models.TextField()
+    candidate_list_type = models.CharField(max_length=50, choices=CandidateListType.choices(), blank=True, null=True)
 
     class Meta:
         managed = True
         db_table = 'commission_protocol'
 
         constraints = [
-            models.UniqueConstraint(fields=['protocol_url', 'election_type'], name='unique_protocol_url'),
+            models.UniqueConstraint(fields=['protocol_url', 'candidate_list_type'], name='unique_protocol_url'),
         ]
 
 class District(models.Model):
@@ -158,15 +163,15 @@ class District(models.Model):
 
 
 class CandidatePerformance(models.Model):
-
-    name = models.CharField(max_length=1000)
+    commission = models.ForeignKey(Commission, on_delete=models.CASCADE, blank=True, null=True)
+    name = models.CharField(max_length=2000)
     candidate_type = models.CharField(max_length=20, choices=CandidateType.choices(), blank=True, null=True)
-    commission = models.ForeignKey(CommissionProtocol, on_delete=models.CASCADE)
+    protocol = models.ForeignKey(CommissionProtocol, on_delete=models.CASCADE)
     election = models.ForeignKey(Election, on_delete=models.CASCADE)
-    nominator = models.ForeignKey(Nominator, on_delete=models.CASCADE, blank=True, null=True)
+    nominator = models.ForeignKey(Nominator, on_delete=models.DO_NOTHING, blank=True, null=True)
     candidate_birth_date = models.DateField(blank=True, null=True)
     votes = models.IntegerField()
-    election_type = models.TextField()
+    candidate_list_type = models.CharField(max_length=50, choices=CandidateListType.choices(), blank=True, null=True)
 
 
     def __str__(self):

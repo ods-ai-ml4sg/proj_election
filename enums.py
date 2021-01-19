@@ -5,17 +5,21 @@ class ChoiceEnum(Enum):
     def choices(cls):
         return tuple((i.name, i.value) for i in cls)
 
+    @classmethod
+    def names(cls):
+        return [n.name for n in cls]
+
 class ElectionLevel(ChoiceEnum):
 
     FEDERAL = auto()
     REGIONAL = auto()
     MUNICIPAL = auto()
 
-class ElectionMandateType(ChoiceEnum):
+class ElectionMandateNumberType(ChoiceEnum):
 
     SINGLE_MANDATE = auto()
     MULTI_MANDATE = auto()
-    PARTY_LIST = auto()
+    NO_MANDATES = auto() # referendums
 
 class NominatorType(ChoiceEnum):
 
@@ -52,5 +56,18 @@ class CandidateType(ChoiceEnum):
     PERSON = auto()
     OTHER = auto()
 
+class CandidateListType(ChoiceEnum):
+    '''
+    is there a single list of candidate across all uiks in elections; or different lists for different territories?
+    '''
+
+    COMMON = auto()
+    SPECIFIC = auto()
+
+class ElectionsByCandidateListType(ChoiceEnum):
+
+    COMMON = auto()
+    SPECIFIC = auto()
+    MIXED = auto()
 
 

@@ -8,6 +8,7 @@ crayons==0.4.0
 Django==3.1.4
 django-pandas==0.6.2
 djangorestframework==3.12.2
+html5lib==1.1
 idna==2.10
 libarchive-c==2.9
 lxml==4.6.2
@@ -28,3 +29,5 @@ sqlparse==0.4.1
 tqdm==4.55.1
 urllib3==1.26.2
 webdriver-manager==3.2.2
+webencodings==0.5.1
+xlrd==2.0.1
