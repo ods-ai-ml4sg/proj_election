@@ -5,7 +5,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "elections_db.settings")
 django.setup()
 
 from ORM.models import CommissionProtocol
-
+import ahocorasick
 
 class ProtocolRowValues:
 
@@ -13,7 +13,7 @@ class ProtocolRowValues:
 
 
     protocol_row_guessing = {CommissionProtocol.amount_of_voters.field.name:
-                                 {'present_any':['включен', 'внесен']},
+                                 {'present_any':['включен', 'внесен', 'включён']},
                              CommissionProtocol.invalid_ballots.field.name:
                                  {'present_any':['недействительн']},
                              CommissionProtocol.valid_ballots.field.name:
@@ -26,11 +26,11 @@ class ProtocolRowValues:
                              CommissionProtocol.ballots_given_out_early_at_superior_commission.field.name:
                                  {'present_any': ['икмо', 'оик', 'территориальн', 'окружн', 'муниципальн', 'тик']},
                              CommissionProtocol.ballots_given_out_at_stations.field.name:
-                                 {'present_any': ['в помещен', 'в уик'],
+                                 {'present_any': ['в помещ', 'в уик', 'на участ', ' на избир'],
                                   'present_all': ['выданн'],
-                                  'absent_all': ['досрочно']},
+                                  'absent_all': ['досрочно', ' вне ']},
                              CommissionProtocol.ballots_given_out_outside.field.name:
-                                 {'present_any': ['вне помещен', 'вне уик'],
+                                 {'present_any': ['вне помещен', 'вне уик', 'вне участ'],
                                   'absent_all': ['досрочно']},
                              CommissionProtocol.canceled_ballots.field.name:
                                  {'present_any': ['погаш']},
@@ -41,7 +41,7 @@ class ProtocolRowValues:
                              CommissionProtocol.lost_ballots.field.name:
                                  {'present_any': ['утрач', 'утрат']},
                              CommissionProtocol.appeared_ballots.field.name:
-                                 {'present_any': ['не учтен']}
+                                 {'present_any': ['не учтен', 'неучтен', 'неучтён', 'не учтён']}
                              }
 
 
@@ -160,7 +160,8 @@ class ProtocolRowValues:
                             CommissionProtocol.lost_ballots.field.name:
                                 {"Число утраченных избирательных бюллетеней",
                                  "число утраченных бюллетеней",
-                                 "число бюллетеней по актам об утрате"
+                                 "число бюллетеней по актам об утрате",
+                                 "число утреченных бюллетеней"
                                  },
                             CommissionProtocol.appeared_ballots.field.name:
                                 {"Число не учтенных при получении бюллетеней",
@@ -182,8 +183,17 @@ class ProtocolRowValues:
 
     protocol_row_mapping_with_t_candidates = z = {**protocol_row_mapping, **candidates_technical}
 
+    protocol_row_mapping_reversed_with_candidates = {alias.lower():database_column for database_column, list_of_values in
+                                                     protocol_row_mapping_with_t_candidates.items() for alias in list_of_values}
+
     protocol_row_mapping_reversed = {alias.lower():database_column for database_column, list_of_values in
-                                     protocol_row_mapping_with_t_candidates.items() for alias in list_of_values}
+                                     protocol_row_mapping.items() for alias in list_of_values}
+
+
+    auto = ahocorasick.Automaton()
+    for key in protocol_row_mapping_reversed.keys():
+        auto.add_word(key, key)
+    auto.make_automaton()
 
     @classmethod
     def verify_mapping(cls):
@@ -218,8 +228,8 @@ class ProtocolRowValues:
         renamer = {}
         unmapped_rows = set()
         for current_row_name in list_of_row_names:
-            if current_row_name.lower() in cls.protocol_row_mapping_reversed:
-                renamer[current_row_name] = cls.protocol_row_mapping_reversed[current_row_name]
+            if current_row_name.lower() in cls.protocol_row_mapping_reversed_with_candidates:
+                renamer[current_row_name] = cls.protocol_row_mapping_reversed_with_candidates[current_row_name]
             else:
                 guessed = cls.guess_mapping(current_row_name)
                 if guessed:

@@ -124,22 +124,22 @@ class CommissionProtocol(models.Model):
     protocol_url = models.TextField()
     election = models.ForeignKey(Election, on_delete=models.CASCADE)
     amount_of_voters = models.IntegerField()
-    ballots_received = models.IntegerField()
-    ballots_given_out_early = models.IntegerField()
-    ballots_given_out_early_at_superior_commission = models.IntegerField()
-    ballots_given_out_early_at_uik = models.IntegerField()
-    ballots_given_out_early_far_away = models.IntegerField()
-    ballots_given_out_at_stations = models.IntegerField()
-    ballots_given_out_outside = models.IntegerField()
-    ballots_given_out_total = models.IntegerField()
-    canceled_ballots = models.IntegerField()
-    ballots_found_outside = models.IntegerField()
-    ballots_found_at_station = models.IntegerField()
-    ballots_found_total = models.IntegerField()
-    valid_ballots = models.IntegerField()
-    invalid_ballots = models.IntegerField()
-    lost_ballots = models.IntegerField()
-    appeared_ballots = models.IntegerField()
+    ballots_received = models.IntegerField(blank=True, null=True)
+    ballots_given_out_early = models.IntegerField(blank=True, null=True)
+    ballots_given_out_early_at_superior_commission = models.IntegerField(blank=True, null=True)
+    ballots_given_out_early_at_uik = models.IntegerField(blank=True, null=True)
+    ballots_given_out_early_far_away = models.IntegerField(blank=True, null=True)
+    ballots_given_out_at_stations = models.IntegerField(blank=True, null=True)
+    ballots_given_out_outside = models.IntegerField(blank=True, null=True)
+    ballots_given_out_total = models.IntegerField(blank=True, null=True)
+    canceled_ballots = models.IntegerField(blank=True, null=True)
+    ballots_found_outside = models.IntegerField(blank=True, null=True)
+    ballots_found_at_station = models.IntegerField(blank=True, null=True)
+    ballots_found_total = models.IntegerField(blank=True, null=True)
+    valid_ballots = models.IntegerField(blank=True, null=True)
+    invalid_ballots = models.IntegerField(blank=True, null=True)
+    lost_ballots = models.IntegerField(blank=True, null=True)
+    appeared_ballots = models.IntegerField(blank=True, null=True)
     candidate_list_type = models.CharField(max_length=50, choices=CandidateListType.choices(), blank=True, null=True)
 
     class Meta:
@@ -147,7 +147,7 @@ class CommissionProtocol(models.Model):
         db_table = 'commission_protocol'
 
         constraints = [
-            models.UniqueConstraint(fields=['protocol_url', 'candidate_list_type'], name='unique_protocol_url'),
+            models.UniqueConstraint(fields=['protocol_url', 'candidate_list_type', 'commission_name'], name='unique_protocol_url'),
         ]
 
 class District(models.Model):

@@ -24,7 +24,7 @@ Upgrade-Insecure-Requests: 1
 User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.121 Safari/537.36 OPR/71.0.3770.441"""
 
 HEADERS=dict(i.split(': ') for i in HEADERS.split("\n"))
-DATA_STRING="""start_date={start_date}&urovproved=all&vidvibref=all&vibtype=all&end_date={end_date}&sxemavib=all&action=search_by_calendar&region=0&ok=%C8%F1%EA%E0%F2%FC"""
+DATA_STRING="""start_date={start_date}&urovproved=1&urovproved=2&vidvibref=all&vibtype=all&end_date={end_date}&sxemavib=all&action=search_by_calendar&region=0&ok=%C8%F1%EA%E0%F2%FC"""
 REQUEST_DATE_FORMAT = "%d.%m.%Y"
 
 MONTHS={

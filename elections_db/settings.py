@@ -76,7 +76,7 @@ WSGI_APPLICATION = 'elections_db.wsgi.application'
 import json
 import os
 
-with open(os.path.join(BASE_DIR, 'credentials_local.json')) as credentials:
+with open(os.path.join(BASE_DIR, 'credentials.json')) as credentials:
     credentials = json.load(credentials)
 
 # SECURITY WARNING: keep the secret key used in production secret!

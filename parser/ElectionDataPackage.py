@@ -8,7 +8,7 @@ import numpy as np
 import sqlalchemy
 from django.db.models import Max, Field, ForeignKey
 from django_pandas.io import read_frame
-from sqlalchemy.exc import DataError
+from sqlalchemy.exc import DataError, IntegrityError
 
 from DataLoad.CommissionDataDownloader import CommissionDataDownloader
 from ProtocolRowMapping import ProtocolRowValuesVerified
@@ -29,16 +29,6 @@ class ElectionDataPackage:
     UPLOAD_RETRY_TIMES = 3
     UPLOAD_RETRY_INTERVAL_SECONDS = 5
 
-    total_composition = {CommissionProtocol.ballots_given_out_total.field.name:
-                            [CommissionProtocol.ballots_given_out_early.field.name,
-                             CommissionProtocol.ballots_given_out_at_stations.field.name,
-                             CommissionProtocol.ballots_given_out_outside.field.name],
-                         CommissionProtocol.ballots_found_total.field.name:
-                            [CommissionProtocol.ballots_found_outside.field.name,
-                             CommissionProtocol.ballots_found_at_station.field.name]}
-
-
-
     def __init__(self, protocol_uik_data: pd.DataFrame, candidate_performance: pd.DataFrame, nominators, election_metadata: pd.DataFrame):
         self.protocol_uik_data = protocol_uik_data
         self.candidate_performance = candidate_performance
@@ -47,31 +37,24 @@ class ElectionDataPackage:
 
     def upload_to_database(self):
         engine = CommissionDataDownloader.create_sqlalchemy_engine()
-        with engine.begin() as connection: # handles
-            locked = self.try_to_lock_tables(connection)
-            if locked:
+        with engine.begin() as connection:
+            Election.objects.filter(name__in=self.election_metadata['name'].tolist()).delete()
+            if type(self.nominators)==pd.Series:
                 self.upload_nominators(connection)
+            try:
                 self.create_indices_manually()
-                Election.objects.filter(name__in=self.election_metadata['name'].tolist()).delete()
                 self.upload_df_to_database_on_model(self.election_metadata, Election, connection)
                 self.upload_df_to_database_on_model(self.protocol_uik_data, CommissionProtocol, connection)
                 self.upload_df_to_database_on_model(self.candidate_performance, CandidatePerformance, connection)
-                connection.execute('SELECT pg_advisory_unlock(23)')
+            except Exception as e:
+                raise ValueError(e)
 
-    def try_to_lock_tables(self, connection):
-        for attempt in range(self.UPLOAD_RETRY_TIMES):
-            locked = connection.execute('SELECT pg_try_advisory_lock(23)').fetchall()[0][0]
-            if locked:
-                return True
-            else:
-                time.sleep(self.UPLOAD_RETRY_INTERVAL_SECONDS)
-            return False
+
 
     @classmethod
     def get_field_names(cls, model):
         return [field.name+'_id' if isinstance(field, ForeignKey) else field.name
                 for field in model._meta.get_fields(include_parents=False) if isinstance(field, Field)]
-
 
     def create_indices_manually(self):
         '''
@@ -80,13 +63,18 @@ class ElectionDataPackage:
         nominator_frame = read_frame(Nominator.objects.all())[['name', 'id']]
         max_election_id = Election.objects.aggregate(Max(self.ID))['id__max']
         max_protocol_id = CommissionProtocol.objects.aggregate(Max(self.ID))['id__max']
-        max_election_id = max_election_id if max_election_id else -1
-        max_protocol_id = max_protocol_id if max_protocol_id else -1
+        max_election_id = max_election_id if max_election_id is not None else -1
+        max_protocol_id = max_protocol_id if max_protocol_id is not None else -1
         self.election_metadata[self.ID] = self.election_metadata[Election.election_url.field.name]
-        self.protocol_uik_data[self.ID] = self.protocol_uik_data[CommissionProtocol.protocol_url.field.name]+ \
-                                          self.protocol_uik_data['election_type']
+        try:
+            self.protocol_uik_data[self.ID] = self.protocol_uik_data[CommissionProtocol.protocol_url.field.name]+ \
+                                              self.protocol_uik_data['candidate_list_type'] + \
+                                              self.protocol_uik_data['commission_name']
+        except KeyError:
+            self
         self.candidate_performance['protocol_id'] = self.candidate_performance['protocol_url'] + \
-                                                    self.candidate_performance['election_type']
+                                                    self.candidate_performance['candidate_list_type'] + \
+                                                    self.candidate_performance['commission_name']
         self.candidate_performance['election_id'] = self.candidate_performance['election_url']
         self.protocol_uik_data['election_id'] = self.protocol_uik_data['election_url']
 
@@ -123,72 +111,30 @@ class ElectionDataPackage:
                                 if_exists='append', index=False, con=connection, method='multi', chunksize=1000,
                                 dtype={'path': sqlalchemy.types.JSON})
 
-
-
     def upload_nominators(self, connection):
         CommissionDataDownloader.update_nominators(self.nominators, connection)
 
-
     @classmethod
-    def create_packages(cls,
-                        election_data: pd.Series,
-                        candidate_performance: dict,
-                        candidate_data: dict,
-                        results_data: dict):
-        combined_protocols=[]
-        combined_performance=[]
-        combined_nominators=[]
-        for election_result_type in results_data.keys():
-            protocol_by_type = results_data[election_result_type]
-            candidate_performance_by_type= candidate_performance[election_result_type]
+    def create_package(cls, walkdown, candidates, election_metadata):
+        nominators = None
+        candidate_performance = walkdown.candidate_performance
+        protocol_data = walkdown.protocol_data
+        performance_frame_size = candidate_performance.shape[0]
+        if type(candidates)==pd.DataFrame:
+            try:
+                candidate_performance = pd.merge(candidate_performance, candidates, on=['name'],
+                                                  how='left')
+            except KeyError:
+                return
+            if performance_frame_size != candidate_performance.shape[0]:
+                raise ValueError('Duplicate candidates found')
 
-            candidate_performance_by_type = pd.melt(candidate_performance_by_type, id_vars=['commission_name', 'protocol_url', 'path'],
-                                            var_name=CandidatePerformance.name.field.name,
-                                            value_name=CandidatePerformance.votes.field.name).dropna()
-            protocol_by_type.loc[:, 'election_url'] = election_data['election_url']
-            candidate_performance_by_type.loc[:, 'election_url'] = election_data['election_url']
-            protocol_by_type.loc[:, 'election_type'] = election_result_type
-            candidate_performance_by_type.loc[:, 'election_type'] = election_result_type
-            performance_frame_size = candidate_performance_by_type.shape[0]
-            if candidate_data:
-                candidate_data_by_type = candidate_data[election_result_type]
-                candidate_performance_by_type = pd.merge(candidate_performance_by_type, candidate_data_by_type, on='name', how='left')
-                if performance_frame_size!=candidate_performance_by_type.shape[0]:
-                    raise ValueError('Duplicate candidates found')
-                combined_nominators.append(candidate_data_by_type.nominator.drop_duplicates())
+            nominators = candidates.nominator.drop_duplicates()
 
-            combined_protocols.append(protocol_by_type)
-            combined_performance.append(candidate_performance_by_type)
+        return ElectionDataPackage(protocol_uik_data= protocol_data.assign(election_url = election_metadata['election_url']),
+                                   candidate_performance= candidate_performance.assign(election_url = election_metadata['election_url']),
+                                   nominators = nominators,
+                                   election_metadata = election_metadata.to_frame().T)
 
-
-        combined_protocols = pd.concat(combined_protocols, axis=0)
-        combined_performance = pd.concat(combined_performance, axis=0)
-
-        combined_nominators = pd.concat(combined_nominators).drop_duplicates() if combined_nominators else pd.Series()
-        return ElectionDataPackage(protocol_uik_data= combined_protocols,
-                                   candidate_performance= combined_performance,
-                                   nominators = combined_nominators,
-                                   election_metadata = election_data.to_frame().T)
-
-
-    @classmethod
-    def combine_packages(cls, list_of_packages):
-        return ElectionDataPackage(
-            protocol_uik_data= pd.concat([pack.protocol_uik_data for pack in list_of_packages], axis=0),
-            candidate_performance=pd.concat([pack.candidate_performance for pack in list_of_packages], axis=0),
-            nominators=pd.concat([pack.nominators for pack in list_of_packages], axis=0).drop_duplicates(),
-            election_metadata=pd.concat([pack.election_metadata for pack in list_of_packages], axis=0)
-            )
-
-    @classmethod
-    def add_protocol_items_if_missing(cls, ser):
-        # add aggregate columns
-        for total_item, included_items in cls.total_composition.items():
-            if total_item not in ser.index:
-               ser[total_item] = ser[ser.index & included_items].sum()
-        # add other columns
-        missing_cols = set(ProtocolRowValuesVerified.protocol_row_mapping.keys()).difference(ser.index.tolist())
-        for item in missing_cols:
-            ser[item] = 0
 
 
